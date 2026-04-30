@@ -38,6 +38,13 @@ type UserDefinedReplyInput struct {
 	// Optional supporting copy distinct from UserResponse — most callers will
 	// just leave this empty and rely on UserResponse / UserPrompt.
 	Details string
+
+	// MatchInstruction is an optional, owner-authored gate that runs BEFORE
+	// reply generation. Use it to say things like "only reply if the
+	// commenter typed 'CODE' in their comment" or "only reply when the
+	// commenter is asking about pricing". When non-empty the LLM must
+	// return an empty response if the comment doesn't match.
+	MatchInstruction string
 }
 
 // BuildUserDefinedReplyPrompt assembles the prompt sent to the LLM when a
@@ -48,14 +55,24 @@ type UserDefinedReplyInput struct {
 func BuildUserDefinedReplyPrompt(db *sql.DB, in UserDefinedReplyInput) (string, error) {
 	var b strings.Builder
 
-	// Hard language rule first: applied before any other guidance so the
-	// model gates cross-language replies up front instead of generating a
-	// reply and then second-guessing it.
-	b.WriteString("LANGUAGE RULE (apply BEFORE writing anything else):\n")
-	b.WriteString("1. Identify the primary language of the ORIGINAL POST (ignore emojis, hashtags, URLs, and proper nouns).\n")
-	b.WriteString("2. Identify the primary language of the COMMENT TO RESPOND TO (same rules).\n")
-	b.WriteString("3. If those two languages do not match, you MUST return exactly {\"response\": \"\"} and stop. Do not translate, do not reply across languages.\n")
-	b.WriteString("4. If they match, the entire reply MUST be written in that shared language. No mixing.\n\n")
+	// Optional owner-authored match rule. When set, this is the FIRST gate
+	// so we don't pay for an LLM completion just to throw it away.
+	if strings.TrimSpace(in.MatchInstruction) != "" {
+		b.WriteString("MATCH RULE — THIS OVERRIDES EVERYTHING ELSE:\n")
+		b.WriteString("Step 1. Read the COMMENT below.\n")
+		b.WriteString("Step 2. Decide whether the comment matches this criteria: \"")
+		b.WriteString(strings.TrimSpace(in.MatchInstruction))
+		b.WriteString("\".\n")
+		b.WriteString("Step 3a. If it does NOT match, your ONLY valid output is {\"response\": \"\"}. Do NOT write a reply. Do NOT consider any of the business context, hours, menu, or owner instructions below. Match check fails → empty response. Stop.\n")
+		b.WriteString("Step 3b. If it DOES match, continue with the rest of these instructions and write a reply.\n")
+		b.WriteString("This rule takes priority over any other guidance about being helpful, answering questions, or thanking customers.\n\n")
+	}
+
+	// Language: reply in whatever language the comment is written in. The
+	// LLM is good at language detection from a single message; we don't
+	// need to gate cross-language any more — the business owner asked for
+	// replies in any language the commenter uses.
+	b.WriteString("LANGUAGE: Detect the primary language of the COMMENT (ignore emojis, hashtags, URLs, and proper nouns) and write the entire reply in that language. No mixing.\n\n")
 
 	b.WriteString("You are replying to a comment left on a social media post (e.g., Facebook, Instagram, TikTok) on behalf of a business.\n")
 	b.WriteString("Generate a response that:\n")
@@ -135,7 +152,10 @@ func BuildUserDefinedReplyPrompt(db *sql.DB, in UserDefinedReplyInput) (string, 
 	b.WriteString("4. Use the supporting details IF it makes sense.\n")
 	b.WriteString("5. Do not add placeholders like [insert hours here] — it should feel like a human responded.\n")
 	b.WriteString("6. Keep the response relevant to the comment AND the original post context. Do not go off-topic.\n")
-	b.WriteString("7. Re-check the LANGUAGE RULE at the top before emitting JSON. If the comment language does not match the post language, your output MUST be {\"response\": \"\"}.\n")
+	b.WriteString("7. Write the reply in the same language as the COMMENT — never reply in a different language than the commenter used.\n")
+	if strings.TrimSpace(in.MatchInstruction) != "" {
+		b.WriteString("8. Final self-check: re-read the MATCH RULE at the top. If the comment doesn't satisfy the criteria, your output MUST be {\"response\": \"\"} — do not reply just because you have answers to other questions.\n")
+	}
 
 	return b.String(), nil
 }

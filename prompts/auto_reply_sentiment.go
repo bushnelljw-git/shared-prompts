@@ -74,12 +74,10 @@ func BuildSentimentReplyPrompt(db *sql.DB, in SentimentReplyInput) (string, erro
 
 	var b strings.Builder
 
-	// Same hard language gate as the user-defined builder.
-	b.WriteString("LANGUAGE RULE (apply BEFORE writing anything else):\n")
-	b.WriteString("1. Identify the primary language of the ORIGINAL POST (ignore emojis, hashtags, URLs, and proper nouns).\n")
-	b.WriteString("2. Identify the primary language of the COMMENT TO RESPOND TO (same rules).\n")
-	b.WriteString("3. If those two languages do not match, you MUST return exactly {\"response\": \"\"} and stop. Do not translate, do not reply across languages.\n")
-	b.WriteString("4. If they match, the entire reply MUST be written in that shared language. No mixing.\n\n")
+	// Reply in the comment's language. We no longer gate cross-language
+	// replies — the business owner explicitly wants replies wherever the
+	// commenter happens to be writing from.
+	b.WriteString("LANGUAGE: Detect the primary language of the COMMENT (ignore emojis, hashtags, URLs, and proper nouns) and write the entire reply in that language. No mixing.\n\n")
 
 	b.WriteString("You are replying to a social media comment (e.g., Facebook, Instagram, TikTok) on behalf of a business.\n")
 	b.WriteString(fmt.Sprintf("The comment has been identified as %s. Generate a response that:\n", sentiment))
@@ -211,7 +209,7 @@ func BuildSentimentReplyPrompt(db *sql.DB, in SentimentReplyInput) (string, erro
 	b.WriteString("3. If the comment is hateful, threatening, political, spam, gibberish, or otherwise not worth responding to — return an empty response: {\"response\": \"\"}\n")
 	b.WriteString("4. Avoid placeholders like [insert hours here]; the response should feel human-written.\n")
 	b.WriteString(fmt.Sprintf("5. Ensure the response is appropriate for the %s sentiment and aligns with the specified styles and engagement level.\n", sentiment))
-	b.WriteString("6. Re-check the LANGUAGE RULE at the top before emitting JSON. If the comment language does not match the post language, your output MUST be {\"response\": \"\"}.\n")
+	b.WriteString("6. Write the reply in the same language as the COMMENT — never reply in a different language than the commenter used.\n")
 
 	return b.String(), nil
 }
