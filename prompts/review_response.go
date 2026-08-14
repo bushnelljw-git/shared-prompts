@@ -52,8 +52,14 @@ type ReviewResponseConfig struct {
 	// avoid repetition. Empty slice if none.
 	PreviousResponses []string
 
-	// Length controls response verbosity: "short" (5-10 words), "medium" (1 sentence),
-	// "long" (2-3 sentences).
+	// Length controls response verbosity. These are the sizes the OWNER is
+	// promised in the reply-preferences wizard, and this builder is where that
+	// promise is kept:
+	//   "short"    — a quick phrase, 5-15 words
+	//   "medium"   — 1-2 sentences
+	//   "long"     — 2-3 sentences, more detail
+	//   "adaptive" — match the review (short note → one line; detailed complaint → fuller)
+	// Empty behaves as "short", which is the historical default.
 	Length string
 
 	// Rating is the star rating (1-5). Used for rating-only detection and 5-star acknowledgment.
@@ -63,7 +69,32 @@ type ReviewResponseConfig struct {
 	// (for the response picker UI), fetcher uses 2 (for auto-reply selection).
 	// Defaults to 8 if zero.
 	ResponseCount int
+
+	// Signoff is the owner's signature line (e.g. "— Dana, Owner"), appended
+	// verbatim as the last line of every reply. It is a FIRST-CLASS field, not
+	// free text, because the house rules below ban names, roles and em dashes —
+	// and a sign-off is usually all three. Those bans are rewritten to carry an
+	// explicit exception whenever this is set. Empty means no sign-off line.
+	Signoff string
+
+	// EmojiPolicy is deliberately TRI-STATE: "" (say nothing), EmojiAllow or
+	// EmojiForbid. A plain bool would be wrong — `use_emojis` is false on every
+	// business that has never opened the wizard, and asserting a ban there would
+	// silently change the replies of businesses that never asked for one.
+	EmojiPolicy string
+
+	// BusinessType is what this business actually is ("dental clinic", "coffee
+	// shop"). Empty renders as a neutral "local business" — previously every
+	// reply for every industry opened "...assistant for a restaurant".
+	BusinessType string
 }
+
+// EmojiPolicy values. Anything else (including "") means the prompt says
+// nothing about emojis at all.
+const (
+	EmojiAllow  = "allow"
+	EmojiForbid = "forbid"
+)
 
 // BuildReviewResponsePrompt constructs the full LLM prompt for generating review responses.
 //
@@ -87,29 +118,49 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 		responseCount = 8
 	}
 
+	businessType := strings.TrimSpace(cfg.BusinessType)
+	if businessType == "" {
+		businessType = "local business"
+	}
+
+	// What the owner asked the reply to DO. These drive the conditional house
+	// rules below: several long-standing rules describe the opposite of a style
+	// the owner may have chosen, and a rule that contradicts the setting is the
+	// setting being silently overruled.
+	wantsPersonal := contains(cfg.ResponseStyles, "personalized_message")
+	wantsEngage := contains(cfg.ResponseStyles, "engage")
+	wantsThank := contains(cfg.ResponseStyles, "thank")
+	wantsApologize := contains(cfg.ResponseStyles, "apologize")
+	wantsDetails := contains(cfg.ResponseStyles, "request_details")
+	hasSignoff := strings.TrimSpace(cfg.Signoff) != ""
+
 	// Build style instructions from the enabled style keys
 	var styleInstructions []string
 	for _, style := range cfg.ResponseStyles {
 		switch style {
 		case "thank":
-			styleInstructions = append(styleInstructions, "Express gratitude to the reviewer.")
+			styleInstructions = append(styleInstructions, "Express gratitude to the reviewer — name what they praised.")
 		case "engage":
-			styleInstructions = append(styleInstructions, "Show appreciation and warmth without being pushy.")
+			styleInstructions = append(styleInstructions, "Warmly invite them back to the business (one invitation, never a hard sell).")
 		case "offer_reward":
 			styleInstructions = append(styleInstructions, "Offer an incentive or reward if applicable, ensuring it feels natural.")
 		case "personalized_message":
-			styleInstructions = append(styleInstructions, "Include a personalized message tailored to the tone that acknowledges their specific feedback.")
+			styleInstructions = append(styleInstructions, "Include a personalized line: name ONE specific thing they actually wrote about. Never a template.")
 		case "apologize":
-			styleInstructions = append(styleInstructions, "Apologize sincerely and offer a solution (e.g., 'We're sorry, let us make this right!').")
+			styleInstructions = append(styleInstructions, "Apologize sincerely for the specific thing that went wrong, once, with no hedging.")
 		case "request_details":
-			styleInstructions = append(styleInstructions, "Request more details to understand the issue (e.g., 'Can you share more so we can improve?').")
+			styleInstructions = append(styleInstructions, "Ask them to share more so it can be put right (e.g., 'Can you tell us more so we can fix this?').")
 		case "escalate":
-			styleInstructions = append(styleInstructions, "Mention that the issue will be escalated to a human team member (e.g., 'Our team will reach out soon.').")
+			styleInstructions = append(styleInstructions, "Say a real person from the team will follow up personally.")
 		}
 	}
+	// No styles chosen at all is a real state (a business with no saved
+	// preferences), and the model still needs a floor to work from.
+	noStyles := len(styleInstructions) == 0
+
 	stylesBlock := ""
-	if len(styleInstructions) > 0 {
-		stylesBlock = fmt.Sprintf("\n- %s", strings.Join(styleInstructions, "\n- "))
+	if !noStyles {
+		stylesBlock = "\n- " + strings.Join(styleInstructions, "\n- ")
 	}
 
 	// Reward block — include exact reward text or a generic placeholder
@@ -120,17 +171,6 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 			cfg.Reward, cfg.RedemptionInstructions)
 	} else if contains(cfg.ResponseStyles, "offer_reward") && cfg.RandomizeReward {
 		rewardBlock = "A reward is offered. Incorporate a generic reward (e.g., 'a special discount') naturally and sincerely.\nYou MUST include the generic reward in the response text and mention it will be provided upon next visit or contact."
-	}
-
-	// Special instructions from the business owner + learned preferences from the training loop
-	specialInstructionsBlock := ""
-	if cfg.SpecialInstructions != "" {
-		specialInstructionsBlock = fmt.Sprintf(
-			"Follow these special instructions:\n%q",
-			cfg.SpecialInstructions)
-	}
-	if cfg.LearnedPreferences != "" {
-		specialInstructionsBlock += cfg.LearnedPreferences
 	}
 
 	// Name personalization — extract first name and let LLM decide if appropriate
@@ -154,23 +194,43 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 			firstName, firstName, firstName)
 	}
 
-	// Rating-only reviews (no text, just stars) need special handling
+	// Rating-only reviews (no text, just stars) need special handling. The
+	// per-sentiment lines here are STYLES in disguise, so they only stand in
+	// when the owner did not choose the equivalent style.
 	isRatingOnly := strings.TrimSpace(cfg.ReviewText) == ""
 	ratingOnlyInstruction := ""
 	if isRatingOnly {
-		ratingOnlyInstruction = fmt.Sprintf("\n\nIMPORTANT - RATING-ONLY REVIEW:\nThis reviewer only left a %d-star rating with NO written feedback or comments.\n"+
-			"- DO NOT reference specific feedback, comments, or details they mentioned (because they didn't provide any)\n"+
-			"- DO NOT say things like 'thanks for your feedback' or 'we appreciate your comments' (they didn't leave any)\n"+
-			"- Instead, acknowledge their %d-star rating directly (e.g., 'Thanks for the %d stars!' or 'We appreciate your %d-star rating!')\n"+
-			"- Keep it simple and genuine - just thank them for taking the time to rate\n"+
-			"- For positive ratings (4-5 stars): express gratitude for their support\n"+
-			"- For negative ratings (1-3 stars): acknowledge their rating and invite them to share more details if they'd like\n",
-			cfg.Rating, cfg.Rating, cfg.Rating, cfg.Rating)
+		var b strings.Builder
+		fmt.Fprintf(&b, "\n\nIMPORTANT - RATING-ONLY REVIEW:\nThis reviewer only left a %d-star rating with NO written feedback or comments.\n", cfg.Rating)
+		b.WriteString("- DO NOT reference specific feedback, comments, or details they mentioned (because they didn't provide any)\n")
+		b.WriteString("- DO NOT say things like 'thanks for your feedback' or 'we appreciate your comments' (they didn't leave any)\n")
+		fmt.Fprintf(&b, "- Instead, acknowledge their %d-star rating directly (e.g., 'Thanks for the %d stars!' or 'We appreciate your %d-star rating!')\n", cfg.Rating, cfg.Rating, cfg.Rating)
+		b.WriteString("- Keep it simple and genuine - just thank them for taking the time to rate\n")
+		if wantsThank || noStyles {
+			b.WriteString("- For positive ratings (4-5 stars): express gratitude for their support\n")
+		}
+		if wantsDetails || noStyles {
+			b.WriteString("- For negative ratings (1-3 stars): acknowledge their rating and invite them to share more details if they'd like\n")
+		}
+		ratingOnlyInstruction = b.String()
 	}
 
-	// 5-star reviews get special acknowledgment
+	// 5-star reviews get special acknowledgment. The share is expressed against
+	// the count actually requested — it used to say "4-5 of the 8" even when the
+	// caller asked for 2.
 	fiveStarInstruction := ""
 	if cfg.Rating == 5 {
+		// Roughly half, and never all of them — the sentence's own caveat is
+		// "not every response needs to mention it", so "at least 2 of the 2"
+		// contradicts itself. It used to say "4-5 of the 8" at every count.
+		share := (responseCount + 1) / 2
+		if share >= responseCount && responseCount > 1 {
+			share = responseCount - 1
+		}
+		acknowledgement := fmt.Sprintf("IMPORTANT: Not every response needs to mention '5 stars' explicitly, but at least %d of the %d responses should acknowledge it naturally.\n", share, responseCount)
+		if responseCount == 1 {
+			acknowledgement = "IMPORTANT: Acknowledge the 5 stars naturally, in whatever words fit best.\n"
+		}
 		fiveStarInstruction = "\n\nIMPORTANT - 5-STAR REVIEW ACKNOWLEDGMENT:\n" +
 			"This is a 5-star review! Make sure to acknowledge the 5-star rating in your responses.\n" +
 			"Use natural, varied phrases like:\n" +
@@ -182,23 +242,29 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 			"- 'Love the 5-star review!'\n" +
 			"- 'Thanks for taking the time to leave 5 stars!'\n" +
 			"- '5 stars means the world to us!'\n" +
-			"IMPORTANT: Not every response needs to mention '5 stars' explicitly, but at least 4-5 of the 8 responses should acknowledge it naturally.\n" +
+			acknowledgement +
 			"Keep it casual and authentic - don't force it if it doesn't flow naturally in the response."
 	}
 
-	// Tone descriptions — how the LLM should "sound"
+	// Tone descriptions — how the LLM should "sound". Every value the reply
+	// wizard can produce has a rubric here; a bare label ("- Use a empathetic
+	// tone") tells the model nothing it did not already assume.
 	toneDescription := ""
 	switch tone {
 	case "professional":
 		toneDescription = "warm and genuine, like a friendly business owner talking to a valued customer"
+	case "friendly":
+		toneDescription = "warm and first-person, like a person who is genuinely glad to hear from them ('we're so glad you came in')"
 	case "casual":
 		toneDescription = "casual and friendly, like chatting with a neighbor"
+	case "empathetic":
+		toneDescription = "understanding first — acknowledge how the experience felt for them before anything else"
 	case "fun":
 		toneDescription = "fun and upbeat with playful energy"
 	case "witty":
 		toneDescription = "witty and clever with subtle humor or wordplay (avoid being sarcastic)"
 	case "humorous":
-		toneDescription = "humorous and funny with light jokes, puns, or playful humor that makes people smile (keep it appropriate and friendly)"
+		toneDescription = "light and good-humoured, one wry line at most, never at the customer's expense"
 	case "wild":
 		toneDescription = "wild and enthusiastic with bold, energetic language and lots of excitement"
 	default:
@@ -248,90 +314,197 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 	}
 	exampleJSON += "}"
 
-	return fmt.Sprintf(
-		"You are a customer service AI assistant for a restaurant, tasked with crafting responses to %s customer reviews.\n\n"+
-			"Customer Review:\n%q\n\n"+
-			"Generate exactly %s unique, polite, and helpful replies based on the review. Each response must be RADICALLY DIFFERENT from the others. Each response must:\n"+
-			buildLengthInstruction(cfg.Length)+
+	// ── Assembly ────────────────────────────────────────────────────────────
+	// Composed piece by piece, deliberately NOT as one giant fmt.Sprintf. The
+	// previous single call had 13 verbs against 12 arguments, so every prompt
+	// this function ever produced carried "%!s(int=8)" and "All %!d(MISSING)
+	// responses..." — invisible to `go vet`, because a concatenated
+	// buildLengthInstruction() call made the format string non-constant. Keep
+	// each Sprintf small enough to read in one glance.
+	var p strings.Builder
 
-			"- Use a %s tone to convey genuine human empathy and sound natural.\n"+
-			"- Use COMPLETELY DISTINCT word choices, approaches, and structures (e.g., warm and inviting, brief and direct, enthusiastic, understated, playful, sincere, upbeat, thoughtful).%s\n"+
-			"%s\n"+
-			"%s\n"+
-			"%s%s%s\n\n"+
-			"GOOGLE REVIEW RESPONSE REQUIREMENTS:\n"+
-			"- These responses are for GOOGLE REVIEWS - keep them authentic and conversational\n"+
-			"- Write like you're genuinely responding to a real customer, not writing corporate marketing copy\n"+
-			"- Keep responses SHORT and NATURAL - Google review responses should be brief and genuine\n"+
-			"- Avoid overly formal or sales-focused language that doesn't sound like a real person\n\n"+
-			"NATURAL HUMAN LANGUAGE REQUIREMENTS:\n"+
-			"- Write like a REAL PERSON texting or talking, NOT like a corporate PR statement\n"+
-			"- AVOID formal/stuffy language like 'genuinely delighted', 'memorable feast of flavors', 'truly appreciate your praise'\n"+
-			"- AVOID sales-pitchy phrases like 'explore even more', 'creative delights', 'attentive team'\n"+
-			"- DO NOT use pushy return language like 'come back', 'hurry back', 'visit again', 'see you again', 'welcome you back'\n"+
-			"- Just thank them or acknowledge their feedback - don't pressure them to return\n"+
-			"- Use simple, everyday words that normal people actually say in conversation\n"+
-			"- Keep it SHORT and NATURAL - don't try to pack everything into one long sentence\n"+
-			nameInstruction+"\n\n"+
-			"KEEP IT SIMPLE AND GENERIC:\n"+
-			"- DO NOT mention specific people by name or role (manager, owner, staff names, etc.)\n"+
-			"- DO NOT reference specific menu items or dishes they mentioned\n"+
-			"- DO NOT call out specific actions or details from their review\n"+
-			"- Keep responses GENERIC and focused on overall gratitude or apology\n"+
-			"- LESS IS MORE - the shorter and simpler, the better\n"+
-			"- For POSITIVE reviews: Just thank them warmly and express happiness\n"+
-			"- For NEGATIVE reviews: Apologize briefly and offer to help\n"+
-			"- Think: What would you text if you only had 10 seconds?\n\n"+
-			"EXAMPLES - WHAT NOT TO DO:\n"+
-			"❌ BAD: 'Awesome feedback, thanks for highlighting the manager's help and Jonathan's vibe.'\n"+
-			"❌ BAD: 'Thanks so much for sharing that, it means a lot to hear how the manager guided you through the menu and Jonathan made everything feel just right.'\n"+
-			"❌ BAD: 'Appreciate you calling out the manager's menu rundown and those spot-on mac bites we comped you'\n"+
-			"❌ BAD: 'Glad the mac bites were a hit!'\n\n"+
-			"EXAMPLES - WHAT TO DO:\n"+
-			"✅ GOOD: 'Thanks so much! Really glad you enjoyed everything.'\n"+
-			"✅ GOOD: 'So happy you had a great time with us!'\n"+
-			"✅ GOOD: 'Love hearing this! Thanks for coming in.'\n"+
-			"✅ GOOD: 'Thanks for the kind words! Really appreciate it.'\n"+
-			"✅ GOOD: 'Appreciate you! So glad you enjoyed your visit.'\n\n"+
-			"RADICAL VARIETY REQUIREMENTS - CRITICAL:\n"+
-			"- Each of the %d responses MUST be COMPLETELY DIFFERENT in structure, word choice, and approach\n"+
-			"- NEVER start two responses with the same word or phrase\n"+
-			"- NEVER end two responses with the same sentiment or structure\n"+
-			"- Use different sentence lengths: some very short (3-5 words), some medium, some longer\n"+
-			"- Vary emotional intensity: some enthusiastic, some calm, some playful, some sincere, some warm, some brief\n"+
-			"- AVOID repetitive phrases like 'over the moon', 'epic bites', 'cheesy magic', 'blew you away', etc.\n"+
-			"- Use FRESH, VARIED language for each response - never repeat the same opening or closing phrases\n"+
-			"- Be creative and authentic - imagine you're %d different people each writing their own unique response\n"+
-			"- If you've used a phrase in one response, find a completely different way to express it in others\n"+
-			buildPreviousResponsesBlock(cfg.PreviousResponses)+"\n"+
-			"Output the responses in this EXACT JSON format, with no additional text, markdown, backticks, or comments:\n"+
-			"{\n"+
-			jsonFields+
-			"}\n\n"+
-			"CRITICAL INSTRUCTIONS:\n"+
-			"- Output ONLY the JSON object. Do NOT include any extra text, explanations, markdown, backticks, or comments.\n"+
-			"- Ensure the JSON is valid: use double quotes for strings, escape any quotes within the responses, and avoid trailing commas.\n"+
-			"- All %d responses must be non-empty strings adhering to the specified tone, style, and instructions.\n"+
-			"- NEVER use em dashes (—) or semicolons (;) in responses. Write naturally like a real person would.\n"+
-			"- Use simple punctuation: periods, commas, exclamation points, and question marks only.\n"+
-			"- Keep the writing conversational and authentic, as if a friendly human is responding.\n"+
-			"- The output will be parsed by a strict JSON validator, and any deviation from the format will cause an error.\n\n"+
-			"Example of correct output:\n"+
-			exampleJSON,
-		cfg.Sentiment, cfg.ReviewText, countWord, toneDescription, stylesBlock, rewardBlock, specialInstructionsBlock, ratingOnlyInstruction, fiveStarInstruction,
-		responseCount, responseCount, responseCount)
+	fmt.Fprintf(&p, "You are a customer service AI assistant for a %s, tasked with crafting responses to %s customer reviews.\n\n", businessType, cfg.Sentiment)
+	fmt.Fprintf(&p, "Customer Review:\n%q\n\n", cfg.ReviewText)
+	fmt.Fprintf(&p, "Generate exactly %s unique, polite, and helpful replies based on the review. Each response must be RADICALLY DIFFERENT from the others. Each response must:\n", countWord)
+	p.WriteString(buildLengthInstruction(cfg.Length))
+	fmt.Fprintf(&p, "- Use a tone that is %s.\n", toneDescription)
+	p.WriteString("- Use COMPLETELY DISTINCT word choices, approaches, and structures (e.g., warm and inviting, brief and direct, enthusiastic, understated, playful, sincere, upbeat, thoughtful).")
+	p.WriteString(stylesBlock)
+	p.WriteString("\n")
+	if rewardBlock != "" {
+		p.WriteString(rewardBlock + "\n")
+	}
+	p.WriteString(ratingOnlyInstruction)
+	p.WriteString(fiveStarInstruction)
+
+	p.WriteString("\n\nGOOGLE REVIEW RESPONSE REQUIREMENTS:\n" +
+		"- These responses are for GOOGLE REVIEWS - keep them authentic and conversational\n" +
+		"- Write like you're genuinely responding to a real customer, not writing corporate marketing copy\n" +
+		"- Keep responses SHORT and NATURAL - Google review responses should be brief and genuine\n" +
+		"- Avoid overly formal or sales-focused language that doesn't sound like a real person\n\n")
+
+	p.WriteString("NATURAL HUMAN LANGUAGE REQUIREMENTS:\n" +
+		"- Write like a REAL PERSON texting or talking, NOT like a corporate PR statement\n" +
+		"- AVOID formal/stuffy language like 'genuinely delighted', 'memorable feast of flavors', 'truly appreciate your praise'\n" +
+		"- AVOID sales-pitchy phrases like 'explore even more', 'creative delights', 'attentive team'\n")
+	if !wantsEngage {
+		// Only a ban when the owner did NOT ask for an invitation back. With
+		// "engage" chosen, this line outlawed the style word for word.
+		p.WriteString("- DO NOT use pushy return language like 'come back', 'hurry back', 'visit again', 'see you again', 'welcome you back'\n" +
+			"- Just thank them or acknowledge their feedback - don't pressure them to return\n")
+	} else {
+		p.WriteString("- ONE warm invitation back is welcome (that is what was asked for) - never stack several, and never pressure them\n")
+	}
+	p.WriteString("- Use simple, everyday words that normal people actually say in conversation\n" +
+		"- Keep it SHORT and NATURAL - don't try to pack everything into one long sentence\n")
+	p.WriteString(nameInstruction)
+	p.WriteString("\n\n")
+
+	// The "keep it generic" house style. It is RIGHT for a business that never
+	// chose personalization and WRONG — a direct contradiction — for one that
+	// did, which is why it is now two different blocks rather than one.
+	if wantsPersonal {
+		p.WriteString("BE SPECIFIC, BUT KEEP IT SHORT:\n" +
+			"- Name ONE concrete thing from their review - the dish, the wait, the person, whatever they actually wrote about\n" +
+			"- ONE specific detail is the goal, not an inventory of everything they said\n" +
+			"- NEVER invent a detail they did not mention\n" +
+			"- LESS IS MORE - one specific line beats three generic ones\n")
+	} else {
+		p.WriteString("KEEP IT SIMPLE AND GENERIC:\n" +
+			"- DO NOT reference specific menu items or dishes they mentioned\n" +
+			"- DO NOT call out specific actions or details from their review\n" +
+			"- Keep responses GENERIC and focused on overall gratitude or apology\n" +
+			"- LESS IS MORE - the shorter and simpler, the better\n")
+	}
+	// The name/role ban has two natural enemies: the sign-off (usually a name
+	// AND a role) and personalization (the reviewer may have praised a named
+	// barista by name). What the rule is actually for is not INVENTING people,
+	// so say that instead of banning all of them.
+	nameBan := "- DO NOT mention specific people by name or role (manager, owner, staff names, etc.)"
+	if wantsPersonal {
+		nameBan = "- DO NOT introduce people by name or role (manager, owner, staff names) who the reviewer did not mention themselves — echoing someone they named is fine, inventing one is not"
+	}
+	if hasSignoff {
+		nameBan += ", except the sign-off line specified below"
+	}
+	p.WriteString(nameBan + "\n")
+	// Only a floor: with styles chosen, the style block above already said what
+	// the reply does, and this pair used to override it.
+	if noStyles {
+		p.WriteString("- For POSITIVE reviews: Just thank them warmly and express happiness\n" +
+			"- For NEGATIVE reviews: Apologize briefly and offer to help\n")
+	} else {
+		if wantsThank {
+			p.WriteString("- For POSITIVE reviews: Just thank them warmly and express happiness\n")
+		}
+		if wantsApologize {
+			p.WriteString("- For NEGATIVE reviews: Apologize briefly and offer to help\n")
+		}
+	}
+	p.WriteString("- Think: What would you text if you only had 10 seconds?\n\n")
+
+	if !wantsPersonal {
+		// These BAD examples punish specificity, so they only belong with the
+		// generic house style.
+		p.WriteString("EXAMPLES - WHAT NOT TO DO:\n" +
+			"❌ BAD: 'Awesome feedback, thanks for highlighting the manager's help and Jonathan's vibe.'\n" +
+			"❌ BAD: 'Thanks so much for sharing that, it means a lot to hear how the manager guided you through the menu and Jonathan made everything feel just right.'\n" +
+			"❌ BAD: 'Appreciate you calling out the manager's menu rundown and those spot-on mac bites we comped you'\n" +
+			"❌ BAD: 'Glad the mac bites were a hit!'\n\n")
+	}
+	p.WriteString("EXAMPLES - WHAT TO DO:\n" +
+		"✅ GOOD: 'Thanks so much! Really glad you enjoyed everything.'\n" +
+		"✅ GOOD: 'So happy you had a great time with us!'\n" +
+		"✅ GOOD: 'Love hearing this! Thanks for coming in.'\n" +
+		"✅ GOOD: 'Thanks for the kind words! Really appreciate it.'\n" +
+		"✅ GOOD: 'Appreciate you! So glad you enjoyed your visit.'\n\n")
+
+	p.WriteString("RADICAL VARIETY REQUIREMENTS - CRITICAL:\n")
+	fmt.Fprintf(&p, "- Each of the %d responses MUST be COMPLETELY DIFFERENT in structure, word choice, and approach\n", responseCount)
+	p.WriteString("- NEVER start two responses with the same word or phrase\n" +
+		"- NEVER end two responses with the same sentiment or structure\n" +
+		"- Use different sentence lengths: some very short (3-5 words), some medium, some longer\n" +
+		"- Vary emotional intensity: some enthusiastic, some calm, some playful, some sincere, some warm, some brief\n" +
+		"- AVOID repetitive phrases like 'over the moon', 'epic bites', 'cheesy magic', 'blew you away', etc.\n" +
+		"- Use FRESH, VARIED language for each response - never repeat the same opening or closing phrases\n")
+	fmt.Fprintf(&p, "- Be creative and authentic - imagine you're %d different people each writing their own unique response\n", responseCount)
+	p.WriteString("- If you've used a phrase in one response, find a completely different way to express it in others\n")
+	p.WriteString(buildPreviousResponsesBlock(cfg.PreviousResponses))
+	p.WriteString("\n")
+
+	// ── The owner's own words, LAST ─────────────────────────────────────────
+	// Everything above is house style. What follows is what this specific owner
+	// asked for, and it is placed after the house rules on purpose: the later,
+	// more specific instruction is the one that should win.
+	if s := strings.TrimSpace(cfg.Signoff); s != "" {
+		fmt.Fprintf(&p, "MANDATORY SIGN-OFF:\n"+
+			"Every response MUST end with this exact text, on its own final line:\n%s\n"+
+			"This is the business owner's own signature. It is REQUIRED, it overrides the rule above about not naming people or roles, it may contain punctuation the rest of the reply avoids, and it does not count against the length limit.\n\n", s)
+	}
+	switch cfg.EmojiPolicy {
+	case EmojiAllow:
+		p.WriteString("EMOJI: at most one emoji per response, and only where it lands naturally (never in an apology to an unhappy customer).\n\n")
+	case EmojiForbid:
+		p.WriteString("EMOJI: Do NOT use emojis. Zero emoji characters anywhere in the response.\n\n")
+	}
+	if cfg.SpecialInstructions != "" {
+		fmt.Fprintf(&p, "Follow these special instructions from the business owner:\n%s\n\n", cfg.SpecialInstructions)
+	}
+	if cfg.LearnedPreferences != "" {
+		p.WriteString(cfg.LearnedPreferences)
+		p.WriteString("\n")
+	}
+
+	p.WriteString("Output the responses in this EXACT JSON format, with no additional text, markdown, backticks, or comments:\n" +
+		"{\n" + jsonFields + "}\n\n")
+	p.WriteString("CRITICAL INSTRUCTIONS:\n" +
+		"- Output ONLY the JSON object. Do NOT include any extra text, explanations, markdown, backticks, or comments.\n" +
+		"- Ensure the JSON is valid: use double quotes for strings, escape any quotes within the responses, and avoid trailing commas.\n")
+	fmt.Fprintf(&p, "- All %d responses must be non-empty strings adhering to the specified tone, style, and instructions.\n", responseCount)
+	if hasSignoff {
+		p.WriteString("- NEVER use em dashes (—) or semicolons (;) in responses, except inside the mandatory sign-off, which is reproduced exactly as given. Write naturally like a real person would.\n")
+	} else {
+		p.WriteString("- NEVER use em dashes (—) or semicolons (;) in responses. Write naturally like a real person would.\n")
+	}
+	p.WriteString("- Use simple punctuation: periods, commas, exclamation points, and question marks only.\n" +
+		"- Keep the writing conversational and authentic, as if a friendly human is responding.\n" +
+		"- The output will be parsed by a strict JSON validator, and any deviation from the format will cause an error.\n\n" +
+		"Example of correct output:\n" + exampleJSON)
+
+	// Optional blocks leave seams (a section that rendered empty between two
+	// that ended in a newline). Collapse them once, here, rather than making
+	// every writer above responsible for its neighbour's spacing.
+	return collapseBlankLines(p.String())
+}
+
+// collapseBlankLines reduces any run of 3+ newlines to exactly two, so an
+// omitted optional block never shows as a gap.
+func collapseBlankLines(s string) string {
+	for strings.Contains(s, "\n\n\n") {
+		s = strings.ReplaceAll(s, "\n\n\n", "\n\n")
+	}
+	return s
 }
 
 // buildLengthInstruction returns the length constraint for each response.
+//
+// These sizes are the ones the owner is SHOWN when they pick a length in the
+// reply-preferences wizard, and they are the contract. Two things used to be
+// wrong here: "medium" was rendered as "1 sentence only" while the wizard
+// promised 1-2, and "adaptive" — a first-class choice in the wizard — was not a
+// case at all, so it fell into the default and was rendered as "EXTREMELY
+// brief... 5-10 words", the exact opposite of matching the review.
 func buildLengthInstruction(length string) string {
 	switch length {
 	case "long":
-		return "- Be engaging and thoughtful, limited to 2-3 short sentences.\n"
+		return "- Be engaging and thoughtful, 2-3 sentences with a little more detail.\n"
 	case "medium":
-		return "- Be concise and engaging, limited to 1 sentence only.\n"
+		return "- Be concise and engaging, 1-2 sentences.\n"
+	case "adaptive":
+		return "- Match the length to what they wrote: one warm line for a short note, 2-4 sentences when the review is detailed or raises a problem.\n"
 	default:
 		// "short" or unspecified — super brief, a quick phrase
-		return "- Be EXTREMELY brief. Use a SHORT phrase or fragment, roughly 5-10 words max. Think quick text-message style.\n"
+		return "- Be EXTREMELY brief. Use a SHORT phrase or fragment, roughly 5-15 words max. Think quick text-message style.\n"
 	}
 }
 
