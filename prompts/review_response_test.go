@@ -127,11 +127,12 @@ func TestPersonalizedMessageIsNotBannedByGenericRules(t *testing.T) {
 	mustContain(t, out, "personalized")
 }
 
-// With no personalization style chosen, the generic guidance is the right
-// default and must survive — this is the legacy behaviour.
-func TestGenericRulesSurviveWhenPersonalizationIsNotChosen(t *testing.T) {
+// With no style that requires naming specifics (neither personalized_message
+// nor apologize), the generic guidance is the right default and must survive —
+// this is the legacy behaviour.
+func TestGenericRulesSurviveWhenNoSpecificityIsRequired(t *testing.T) {
 	cfg := base()
-	cfg.ResponseStyles = []string{"apologize"}
+	cfg.ResponseStyles = []string{"request_details"}
 	out := BuildReviewResponsePrompt(cfg)
 	mustContain(t, out, "Keep responses GENERIC")
 }
@@ -232,6 +233,44 @@ func TestNoTripleBlankLines(t *testing.T) {
 			t.Errorf("case %d: prompt contains a triple newline seam", i)
 		}
 	}
+}
+
+// Found by testing the live service, not by any earlier unit test. With
+// `apologize` chosen but not `personalized_message`, the generic block still
+// said "DO NOT call out specific actions or details from their review" — which
+// forbids the apologize style's own "for the specific thing that went wrong".
+// The observed reply to a 2-star complaint about a 40-minute wait and cold food
+// opened "thanks for the feedback" and never apologised.
+func TestApologizeIsNotBannedFromNamingWhatWentWrong(t *testing.T) {
+	cfg := base()
+	cfg.ResponseStyles = []string{"apologize", "request_details"}
+	out := BuildReviewResponsePrompt(cfg)
+
+	mustNotContain(t, out,
+		"DO NOT call out specific actions or details from their review",
+		"DO NOT reference specific menu items or dishes they mentioned",
+		"Keep responses GENERIC",
+	)
+	mustContain(t, out, "Say sorry for the specific thing they described")
+	// A vague apology is the failure mode actually observed, so name it.
+	mustContain(t, out, "sorry you feel that way")
+}
+
+// The ❌ BAD examples punish specificity too, so they must not sit next to an
+// instruction to name what went wrong.
+func TestBadExamplesAreDroppedWhenSpecificityIsRequired(t *testing.T) {
+	for _, styles := range [][]string{{"apologize"}, {"personalized_message"}, {"apologize", "personalized_message"}} {
+		cfg := base()
+		cfg.ResponseStyles = styles
+		out := BuildReviewResponsePrompt(cfg)
+		if strings.Contains(out, "EXAMPLES - WHAT NOT TO DO") {
+			t.Errorf("styles %v: the anti-specificity examples are still present", styles)
+		}
+	}
+	// With neither, they are the right house style and must survive.
+	cfg := base()
+	cfg.ResponseStyles = []string{"request_details"}
+	mustContain(t, BuildReviewResponsePrompt(cfg), "EXAMPLES - WHAT NOT TO DO")
 }
 
 // ── 3. Sign-off ──────────────────────────────────────────────────────────────

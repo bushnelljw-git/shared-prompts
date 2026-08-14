@@ -360,16 +360,30 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 	p.WriteString(nameInstruction)
 	p.WriteString("\n\n")
 
-	// The "keep it generic" house style. It is RIGHT for a business that never
-	// chose personalization and WRONG — a direct contradiction — for one that
-	// did, which is why it is now two different blocks rather than one.
-	if wantsPersonal {
+	// The "keep it generic" house style. It is RIGHT for a business that asked
+	// for neither personalization nor an apology, and WRONG — a direct
+	// contradiction — for one that did.
+	//
+	// `apologize` belongs on this list as much as `personalized_message` does:
+	// the style says "apologize for the SPECIFIC thing that went wrong", and
+	// "DO NOT call out specific actions or details from their review" forbids
+	// exactly that. Observed live on a 2-star complaint about a 40-minute wait
+	// and cold food — the reply opened "thanks for the feedback" and never
+	// apologised, because a specific apology was banned 30 lines further down.
+	switch {
+	case wantsPersonal:
 		p.WriteString("BE SPECIFIC, BUT KEEP IT SHORT:\n" +
 			"- Name ONE concrete thing from their review - the dish, the wait, the person, whatever they actually wrote about\n" +
 			"- ONE specific detail is the goal, not an inventory of everything they said\n" +
 			"- NEVER invent a detail they did not mention\n" +
 			"- LESS IS MORE - one specific line beats three generic ones\n")
-	} else {
+	case wantsApologize:
+		p.WriteString("KEEP IT SHORT, BUT NAME WHAT WENT WRONG:\n" +
+			"- Say sorry for the specific thing they described - the wait, the cold food, being ignored\n" +
+			"- A vague apology ('sorry you feel that way', 'thanks for the feedback') reads as a brush-off and is worse than none\n" +
+			"- NEVER invent a detail they did not mention, and never argue or defend\n" +
+			"- LESS IS MORE - one honest line beats a paragraph\n")
+	default:
 		p.WriteString("KEEP IT SIMPLE AND GENERIC:\n" +
 			"- DO NOT reference specific menu items or dishes they mentioned\n" +
 			"- DO NOT call out specific actions or details from their review\n" +
@@ -403,9 +417,10 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 	}
 	p.WriteString("- Think: What would you text if you only had 10 seconds?\n\n")
 
-	if !wantsPersonal {
+	if !wantsPersonal && !wantsApologize {
 		// These BAD examples punish specificity, so they only belong with the
-		// generic house style.
+		// generic house style — not next to an instruction to name what went
+		// wrong.
 		p.WriteString("EXAMPLES - WHAT NOT TO DO:\n" +
 			"❌ BAD: 'Awesome feedback, thanks for highlighting the manager's help and Jonathan's vibe.'\n" +
 			"❌ BAD: 'Thanks so much for sharing that, it means a lot to hear how the manager guided you through the menu and Jonathan made everything feel just right.'\n" +
