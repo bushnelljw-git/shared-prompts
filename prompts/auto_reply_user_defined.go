@@ -139,6 +139,11 @@ func BuildUserDefinedReplyPrompt(db *sql.DB, in UserDefinedReplyInput) (string, 
 		b.WriteString("\n")
 	}
 
+	// The same punctuation rule the review replies obey. A comment reply is read
+	// by a customer with the business's name on it, so it is the same rule.
+	b.WriteString("\n")
+	b.WriteString(NoEmDashRuleBlock(""))
+
 	b.WriteString("\n--- Output Format ---\n")
 	b.WriteString("Return the response as a valid JSON object with a single field `response` containing the reply text. Example:\n")
 	b.WriteString("{\"response\": \"Your reply text here.\"}\n")
@@ -156,6 +161,7 @@ func BuildUserDefinedReplyPrompt(db *sql.DB, in UserDefinedReplyInput) (string, 
 	if strings.TrimSpace(in.MatchInstruction) != "" {
 		b.WriteString("8. Final self-check: re-read the MATCH RULE at the top. If the comment doesn't satisfy the criteria, your output MUST be {\"response\": \"\"} — do not reply just because you have answers to other questions.\n")
 	}
+	b.WriteString(NoEmDashReminder(""))
 
 	return b.String(), nil
 }

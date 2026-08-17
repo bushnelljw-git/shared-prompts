@@ -197,6 +197,11 @@ func BuildSentimentReplyPrompt(db *sql.DB, in SentimentReplyInput) (string, erro
 		b.WriteString("\n")
 	}
 
+	// The same punctuation rule the review replies obey. A comment reply is read
+	// by a customer with the business's name on it, so it is the same rule.
+	b.WriteString("\n")
+	b.WriteString(NoEmDashRuleBlock(""))
+
 	b.WriteString("\n--- Output Format ---\n")
 	b.WriteString("Return the response as a valid JSON object with a single field `response` containing the reply text. Example:\n")
 	b.WriteString("{\"response\": \"Your reply text here.\"}\n")
@@ -210,6 +215,7 @@ func BuildSentimentReplyPrompt(db *sql.DB, in SentimentReplyInput) (string, erro
 	b.WriteString("4. Avoid placeholders like [insert hours here]; the response should feel human-written.\n")
 	b.WriteString(fmt.Sprintf("5. Ensure the response is appropriate for the %s sentiment and aligns with the specified styles and engagement level.\n", sentiment))
 	b.WriteString("6. Write the reply in the same language as the COMMENT — never reply in a different language than the commenter used.\n")
+	b.WriteString(NoEmDashReminder(""))
 
 	return b.String(), nil
 }

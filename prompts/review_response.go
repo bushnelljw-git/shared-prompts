@@ -337,7 +337,12 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 	p.WriteString(ratingOnlyInstruction)
 	p.WriteString(fiveStarInstruction)
 
-	p.WriteString("\n\nGOOGLE REVIEW RESPONSE REQUIREMENTS:\n" +
+	// Stated HERE, near the top, and restated in the final checklist. Buried at
+	// the bottom among the JSON-validity notes it read as a formatting footnote
+	// and live drafts kept coming back dashed.
+	p.WriteString("\n\n" + NoEmDashRuleBlock(cfg.Signoff))
+
+	p.WriteString("\nGOOGLE REVIEW RESPONSE REQUIREMENTS:\n" +
 		"- These responses are for GOOGLE REVIEWS - keep them authentic and conversational\n" +
 		"- Write like you're genuinely responding to a real customer, not writing corporate marketing copy\n" +
 		"- Keep responses SHORT and NATURAL - Google review responses should be brief and genuine\n" +
@@ -476,11 +481,7 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 		"- Output ONLY the JSON object. Do NOT include any extra text, explanations, markdown, backticks, or comments.\n" +
 		"- Ensure the JSON is valid: use double quotes for strings, escape any quotes within the responses, and avoid trailing commas.\n")
 	fmt.Fprintf(&p, "- All %d responses must be non-empty strings adhering to the specified tone, style, and instructions.\n", responseCount)
-	if hasSignoff {
-		p.WriteString("- NEVER use em dashes (—) or semicolons (;) in responses, except inside the mandatory sign-off, which is reproduced exactly as given. Write naturally like a real person would.\n")
-	} else {
-		p.WriteString("- NEVER use em dashes (—) or semicolons (;) in responses. Write naturally like a real person would.\n")
-	}
+	p.WriteString(NoEmDashReminder(cfg.Signoff))
 	p.WriteString("- Use simple punctuation: periods, commas, exclamation points, and question marks only.\n" +
 		"- Keep the writing conversational and authentic, as if a friendly human is responding.\n" +
 		"- The output will be parsed by a strict JSON validator, and any deviation from the format will cause an error.\n\n" +
