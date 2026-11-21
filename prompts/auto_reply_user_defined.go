@@ -143,6 +143,8 @@ func BuildUserDefinedReplyPrompt(db *sql.DB, in UserDefinedReplyInput) (string, 
 	// by a customer with the business's name on it, so it is the same rule.
 	b.WriteString("\n")
 	b.WriteString(NoEmDashRuleBlock(""))
+	// Who a reply may name: the commenter, names in the comment, names in the owner's own instructions.
+	b.WriteString("\n" + NoInventedPeopleRule() + "\n")
 
 	b.WriteString("\n--- Output Format ---\n")
 	b.WriteString("Return the response as a valid JSON object with a single field `response` containing the reply text. Example:\n")

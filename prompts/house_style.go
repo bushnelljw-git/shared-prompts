@@ -44,6 +44,20 @@ func NoEmDashRuleBlock(signoff string) string {
 	return b.String()
 }
 
+// NoInventedPeopleRule is the one wording of who a reply may name, for every
+// business (2026-11-20, founder: a written reply said "Ask for <name> next
+// visit" about a staff member the review never mentioned). A reply may use the
+// customer's own name, a name written in the review or comment it answers, and
+// a name in the owner's own saved reply instructions (special instructions, the
+// sign-off). Nothing else: not a name from the business's facts, not an invented
+// one. Every reply builder in this package renders it after the owner's own
+// instructions and before the output format. reviewprocessor restates it
+// verbatim (replyprefs.PeopleRule) while it pins an older version of this
+// package: change it here first, then there.
+func NoInventedPeopleRule() string {
+	return "WHO A REPLY MAY NAME: never name a person (owner, manager, staff member or anyone else) unless that exact name is written in the review or comment you are answering, or in the business owner's own saved reply instructions. A name from anywhere else, or one you made up, stays out. Greeting the customer by the name they posted under is fine. With no such name, speak as the business: \"Ask us about it next time\", never \"Ask for <a name> next time\"."
+}
+
 // NoEmDashReminder is the short restatement for the tail of a prompt, where the
 // final checklist lives. The block above teaches the rule; this is the last
 // thing the model reads before it writes.

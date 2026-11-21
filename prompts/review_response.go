@@ -474,6 +474,8 @@ func BuildReviewResponsePrompt(cfg ReviewResponseConfig) string {
 		p.WriteString(cfg.LearnedPreferences)
 		p.WriteString("\n")
 	}
+	// After the owner's own instructions (the names they allow), before the format.
+	p.WriteString(NoInventedPeopleRule() + "\n\n")
 
 	p.WriteString("Output the responses in this EXACT JSON format, with no additional text, markdown, backticks, or comments:\n" +
 		"{\n" + jsonFields + "}\n\n")

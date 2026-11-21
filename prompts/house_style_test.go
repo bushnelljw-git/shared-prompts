@@ -91,3 +91,37 @@ func TestCommentAutoRepliesStateTheEmDashRule(t *testing.T) {
 	}
 	mustStateTheRule(t, "sentiment auto reply", sentiment)
 }
+
+// Who a reply may name (2026-11-20, founder: a reply said "Ask for <name> next
+// visit" about a staff member the review never mentioned). Every reply builder
+// states it exactly once, and the review prompt states it after the owner's own
+// instructions (the names they allow) and before the output format.
+func TestEveryReplyBuilderStatesWhoAReplyMayName(t *testing.T) {
+	rule := NoInventedPeopleRule()
+	cfg := base()
+	cfg.SpecialInstructions = "Invite them to ask for Dana, our manager."
+	review := BuildReviewResponsePrompt(cfg)
+	if strings.Count(review, rule) != 1 {
+		t.Fatalf("review response: the rule must be stated once, got %d", strings.Count(review, rule))
+	}
+	owner, at, format := strings.Index(review, cfg.SpecialInstructions), strings.Index(review, rule), strings.Index(review, "Output the responses in this EXACT JSON format")
+	if !(owner >= 0 && owner < at && at < format) {
+		t.Fatalf("review response: owner %d rule %d format %d", owner, at, format)
+	}
+
+	db := deadDB()
+	defer db.Close()
+	userDefined, err := BuildUserDefinedReplyPrompt(db, UserDefinedReplyInput{UserID: 1, BusinessID: 1, CommentText: "who should I ask about allergies?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentiment, err := BuildSentimentReplyPrompt(db, SentimentReplyInput{UserID: 1, BusinessID: 1, CommentText: "loved it", IsPositiveReply: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, out := range map[string]string{"user-defined auto reply": userDefined, "sentiment auto reply": sentiment} {
+		if strings.Count(out, rule) != 1 {
+			t.Errorf("%s: the rule must be stated once, got %d", label, strings.Count(out, rule))
+		}
+	}
+}
